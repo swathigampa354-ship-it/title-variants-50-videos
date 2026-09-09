@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Taisly TikTok Scheduler</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --card: #141824;
+      --line: #2a3144;
+      --text: #e8ecf5;
+      --muted: #9aa3b8;
+      --accent: #6d5efc;
+      --ok: #2ecc71;
+      --bad: #ff6b6b;
+      --warn: #f0c14b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1a1540 0%, var(--bg) 55%);
+      color: var(--text); min-height: 100vh; padding: 24px;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 6px; }
+    .sub { color: var(--muted); margin-bottom: 20px; line-height: 1.45; }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+      padding: 16px 18px; margin-bottom: 14px;
+    }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 6px; }
+    input, textarea, select {
+      width: 100%; background: #0d1018; border: 1px solid var(--line); color: var(--text);
+      border-radius: 10px; padding: 10px 12px; font: inherit;
+    }
+    textarea { min-height: 70px; resize: vertical; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
+    button {
+      appearance: none; border: 0; border-radius: 10px; padding: 11px 16px; font: inherit;
+      font-weight: 600; cursor: pointer; background: var(--accent); color: white;
+    }
+    button.secondary { background: #22283a; color: var(--text); border: 1px solid var(--line); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btns { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+    }
+    .pill.ok { background: rgba(46,204,113,.15); color: var(--ok); }
+    .pill.bad { background: rgba(255,107,107,.15); color: var(--bad); }
+    .pill.warn { background: rgba(240,193,75,.15); color: var(--warn); }
+    .pill.muted { background: #22283a; color: var(--muted); }
+    #log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8rem; white-space: pre-wrap; background: #0a0c12; border-radius: 10px;
+      padding: 12px; max-height: 320px; overflow: auto; border: 1px solid var(--line);
+    }
+    .note { font-size: 0.85rem; color: var(--muted); line-height: 1.4; }
+    .err { color: var(--bad); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Taisly → TikTok scheduler</h1>
+    <p class="sub">
+      Schedules <strong>day-3 Video_50 → Video_46</strong> (reverse), <strong>1 post/day × 5 days</strong>, TikTok only.
+      Runs in <em>your browser</em> because the Arena sandbox cannot open TLS to Taisly.
+    </p>
+
+    <div class="card">
+      <label for="key">Taisly API key</label>
+      <input id="key" type="password" placeholder="taisly_..." autocomplete="off" />
+      <div class="btns">
+        <button id="btnAuth" type="button">1. Check auth + platforms</button>
+        <button id="btnPlan" class="secondary" type="button">2. Build schedule plan</button>
+        <button id="btnGo" type="button" disabled>3. Schedule 5 posts</button>
+      </div>
+      <p class="note" style="margin-top:10px">
+        Key stays in this tab only (not sent to Arena). If the browser blocks Taisly with a CORS error,
+        use the laptop script in <code>scripts/SCHEDULE.md</code> instead.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <label for="start">First post date (IST)</label>
+          <input id="start" type="date" value="2026-09-10" />
+        </div>
+        <div>
+          <label for="time">Daily time (IST)</label>
+          <input id="time" type="time" value="10:00" />
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <label for="caption">Caption (same for all 5)</label>
+        <textarea id="caption" placeholder="Optional caption / hashtags"></textarea>
+      </div>
+      <div style="margin-top:12px">
+        <label for="platform">TikTok platform</label>
+        <select id="platform"><option value="">— run step 1 first —</option></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <strong>Plan</strong>
+      <table>
+        <thead><tr><th>#</th><th>Video</th><th>When (IST)</th><th>Status</th></tr></thead>
+        <tbody id="planBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <strong>Log</strong>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const BASE = "https://app.taisly.com/api/private";
+    const VIDEOS = [50, 49, 48, 47, 46].map(n => ({
+      n,
+      name: `Video_${String(n).padStart(2, "0")}.mp4`,
+      url: `./videos/Video_${String(n).padStart(2, "0")}.mp4`,
+    }));
+
+    const logEl = document.getElementById("log");
+    const planBody = document.getElementById("planBody");
+    const platformSel = document.getElementById("platform");
+    const btnGo = document.getElementById("btnGo");
+
+    function log(msg, cls) {
+      const line = document.createElement("div");
+      if (cls) line.className = cls;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function key() {
+      return document.getElementById("key").value.trim();
+    }
+
+    function istParts(dateStr, timeStr) {
+      // Build a Date representing that IST wall time
+      const [y, m, d] = dateStr.split("-").map(Number);
+      const [hh, mm] = timeStr.split(":").map(Number);
+      // IST = UTC+5:30 → UTC = IST - 5:30
+      const utcMs = Date.UTC(y, m - 1, d, hh, mm) - (5.5 * 60 * 60 * 1000);
+      return new Date(utcMs);
+    }
+
+    function buildPlan() {
+      const start = document.getElementById("start").value;
+      const time = document.getElementById("time").value;
+      const rows = VIDEOS.map((v, i) => {
+        const when = istParts(start, time);
+        when.setUTCDate(when.getUTCDate() + i);
+        // recompute properly day by day in IST wall clock:
+        const base = istParts(start, time);
+        const day = new Date(base.getTime() + i * 24 * 60 * 60 * 1000);
+        return { ...v, when: day, ms: day.getTime() };
+      });
+      planBody.innerHTML = rows.map((r, i) => {
+        const istLabel = r.when.toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+          year: "numeric", month: "2-digit", day: "2-digit",
+          hour: "2-digit", minute: "2-digit", hour12: false,
+        }) + " IST";
+        return `<tr data-i="${i}">
+          <td>${i + 1}</td>
+          <td>${r.name}</td>
+          <td>${istLabel}<div class="note">ms=${r.ms}</div></td>
+          <td><span class="pill muted" id="st${i}">pending</span></td>
+        </tr>`;
+      }).join("");
+      window.__plan = rows;
+      log(`Plan ready: ${rows.length} posts starting ${start} ${time} IST`);
+      return rows;
+    }
+
+    async function apiGet(path) {
+      const res = await fetch(BASE + path, {
+        headers: {
+          Authorization: "Bearer " + key(),
+          Accept: "application/json",
+        },
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      return { status: res.status, data };
+    }
+
+    async function apiPostVideo({ fileBlob, filename, platformId, description, scheduledMs }) {
+      const fd = new FormData();
+      fd.append("video", fileBlob, filename);
+      fd.append("platforms", JSON.stringify([platformId]));
+      fd.append("description", description || "");
+      fd.append("previewTime", "0");
+      fd.append("scheduled", String(scheduledMs));
+      const res = await fetch(BASE + "/post", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + key() },
+        body: fd,
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      return { status: res.status, data };
+    }
+
+    document.getElementById("btnAuth").onclick = async () => {
+      if (!key()) { log("Paste API key first", "err"); return; }
+      log("GET /platform/platforms …");
+      try {
+        const { status, data } = await apiGet("/platform/platforms");
+        log(`HTTP ${status} ${JSON.stringify(data).slice(0, 500)}`);
+        if (status !== 200 || !data.success) {
+          log("Auth failed — check key / plan limits", "err");
+          return;
+        }
+        const list = data.data || [];
+        log(`Connected accounts: ${list.length}`);
+        platformSel.innerHTML = "";
+        let tiktokCount = 0;
+        for (const p of list) {
+          const label = `${p.platform} · ${p.username || p.displayName || p.id} · ${p.status || ""}`;
+          const opt = document.createElement("option");
+          opt.value = p.id;
+          opt.textContent = label;
+          const isTT = String(p.platform || "").toLowerCase().includes("tiktok");
+          if (isTT) {
+            opt.selected = tiktokCount === 0;
+            tiktokCount++;
+          }
+          platformSel.appendChild(opt);
+          log("  · " + label);
+        }
+        if (!tiktokCount) {
+          log("No TikTok account connected in Taisly. Connect one at https://app.taisly.com", "err");
+          btnGo.disabled = true;
+        } else {
+          log(`TikTok ready (${tiktokCount}).`, );
+          btnGo.disabled = false;
+          buildPlan();
+        }
+      } catch (e) {
+        log("Browser request failed: " + e, "err");
+        log("Likely CORS or network. Use scripts/schedule_tiktok_day3.py on your laptop.", "err");
+      }
+    };
+
+    document.getElementById("btnPlan").onclick = () => buildPlan();
+
+    document.getElementById("btnGo").onclick = async () => {
+      if (!key()) { log("Paste API key first", "err"); return; }
+      const platformId = platformSel.value;
+      if (!platformId) { log("Pick TikTok platform", "err"); return; }
+      const plan = window.__plan || buildPlan();
+      const caption = document.getElementById("caption").value;
+      btnGo.disabled = true;
+      log(`Starting uploads to platform ${platformId}…`);
+
+      for (let i = 0; i < plan.length; i++) {
+        const row = plan[i];
+        const st = document.getElementById("st" + i);
+        st.className = "pill warn";
+        st.textContent = "uploading…";
+        try {
+          log(`Day ${i + 1}: fetch ${row.url}`);
+          const fileRes = await fetch(row.url);
+          if (!fileRes.ok) throw new Error("video HTTP " + fileRes.status);
+          const blob = await fileRes.blob();
+          log(`Day ${i + 1}: ${row.name} ${blob.size} bytes → schedule ${row.ms}`);
+          const { status, data } = await apiPostVideo({
+            fileBlob: blob,
+            filename: row.name,
+            platformId,
+            description: caption,
+            scheduledMs: row.ms,
+          });
+          log(`Day ${i + 1}: HTTP ${status} ${JSON.stringify(data).slice(0, 400)}`);
+          if (status === 200 && data.success) {
+            st.className = "pill ok";
+            st.textContent = "OK " + (data.historyId || "");
+          } else {
+            st.className = "pill bad";
+            st.textContent = "FAIL";
+          }
+        } catch (e) {
+          st.className = "pill bad";
+          st.textContent = "ERR";
+          log(`Day ${i + 1} error: ${e}`, "err");
+        }
+        await new Promise(r => setTimeout(r, 1200));
+      }
+      log("Done.");
+      btnGo.disabled = false;
+    };
+
+    // Prefill key from query ?key= for convenience (optional)
+    const q = new URLSearchParams(location.search);
+    if (q.get("key")) document.getElementById("key").value = q.get("key");
+    buildPlan();
+  </script>
+</body>
+</html>

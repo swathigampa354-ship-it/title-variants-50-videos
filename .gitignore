@@ -1,0 +1,5 @@
+.env
+.env.*
+**/api_key
+**/.config/
+scheduler-ui/.key
