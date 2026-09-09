@@ -1,0 +1,237 @@
+name: Schedule TikTok posts (Taisly)
+
+# Runs on GitHub-hosted runners (they can reach app.taisly.com).
+# This Arena sandbox blocks TLS to Taisly, so posting must happen here.
+on:
+  workflow_dispatch:
+    inputs:
+      taisly_api_key:
+        description: "Taisly API key (taisly_...) — used only for this run"
+        required: true
+        type: string
+      start_date:
+        description: "First post date (YYYY-MM-DD) in IST"
+        required: true
+        default: "2026-09-10"
+        type: string
+      post_time:
+        description: "Daily post time IST (HH:MM, 24h)"
+        required: true
+        default: "10:00"
+        type: string
+      caption:
+        description: "Caption/description for all 5 posts"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "If true, only list platforms + plan — do not upload"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Schedule 5 TikTok posts (Video_50 → Video_46, 1/day)
+        env:
+          TAISLY_KEY_SECRET: ${{ secrets.TAISLY_API_KEY }}
+          TAISLY_KEY_INPUT: ${{ inputs.taisly_api_key }}
+          START_DATE: ${{ inputs.start_date }}
+          POST_TIME: ${{ inputs.post_time }}
+          CAPTION: ${{ inputs.caption }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # Prefer repo secret; fall back to workflow input
+          if [ -n "${TAISLY_KEY_SECRET:-}" ]; then
+            TAISLY_KEY="$TAISLY_KEY_SECRET"
+          else
+            TAISLY_KEY="$TAISLY_KEY_INPUT"
+          fi
+          export TAISLY_KEY
+          echo "::add-mask::$TAISLY_KEY"
+          python3 <<'PY'
+          import json, os, sys, time, subprocess
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from urllib.error import HTTPError, URLError
+
+          KEY = (os.environ.get("TAISLY_KEY") or "").strip()
+          if not KEY or KEY == "taisly_your_key":
+              print("ERROR: No Taisly API key. Pass workflow input or set TAISLY_API_KEY secret.")
+              sys.exit(1)
+
+          BASE = "https://app.taisly.com/api/private"
+          IST = timezone(timedelta(hours=5, minutes=30))
+          START_DATE = os.environ["START_DATE"].strip()
+          POST_TIME = os.environ["POST_TIME"].strip()
+          CAPTION = os.environ.get("CAPTION") or ""
+          DRY_RUN = os.environ.get("DRY_RUN", "false").lower() in ("1", "true", "yes")
+
+          def api(method, path, data=None, form_fields=None, files=None):
+              url = BASE + path
+              if form_fields is not None or files is not None:
+                  # multipart via curl (reliable for large uploads)
+                  cmd = [
+                      "curl", "-sS", "-X", method, url,
+                      "-H", f"Authorization: Bearer {KEY}",
+                      "-w", "\n__HTTP_STATUS__:%{http_code}",
+                  ]
+                  for k, v in (form_fields or {}).items():
+                      cmd += ["-F", f"{k}={v}"]
+                  for k, path_v in (files or {}).items():
+                      cmd += ["-F", f"{k}=@{path_v}"]
+                  out = subprocess.check_output(cmd, text=True)
+                  if "__HTTP_STATUS__:" in out:
+                      body, _, status_part = out.rpartition("\n__HTTP_STATUS__:")
+                      status = int(status_part.strip())
+                  else:
+                      body, status = out, 0
+                  try:
+                      parsed = json.loads(body) if body.strip() else {}
+                  except json.JSONDecodeError:
+                      parsed = {"raw": body}
+                  return status, parsed
+
+              headers = {
+                  "Authorization": f"Bearer {KEY}",
+                  "Accept": "application/json",
+                  "User-Agent": "arena-taisly-scheduler/1.0",
+              }
+              body = None
+              if data is not None:
+                  body = json.dumps(data).encode()
+                  headers["Content-Type"] = "application/json"
+              req = Request(url, data=body, headers=headers, method=method)
+              try:
+                  with urlopen(req, timeout=120) as resp:
+                      raw = resp.read().decode()
+                      return resp.status, json.loads(raw) if raw else {}
+              except HTTPError as e:
+                  raw = e.read().decode()
+                  try:
+                      parsed = json.loads(raw) if raw else {}
+                  except json.JSONDecodeError:
+                      parsed = {"raw": raw}
+                  return e.code, parsed
+              except URLError as e:
+                  return 0, {"error": str(e)}
+
+          print("=== 1) taisly_auth_status / platforms ===")
+          status, platforms_resp = api("GET", "/platform/platforms")
+          print("HTTP", status)
+          print(json.dumps(platforms_resp, indent=2)[:4000])
+          if status != 200 or not platforms_resp.get("success"):
+              print("ERROR: Auth/platforms failed. Check API key.")
+              sys.exit(1)
+
+          platforms = platforms_resp.get("data") or []
+          print(f"\nAuthenticated. Connected accounts: {len(platforms)}")
+          for p in platforms:
+              print(
+                  f"  - id={p.get('id')} platform={p.get('platform')} "
+                  f"user={p.get('username') or p.get('displayName')} status={p.get('status')}"
+              )
+
+          tiktok = [
+              p for p in platforms
+              if str(p.get("platform", "")).lower() in ("tiktok", "tik tok")
+              and str(p.get("status", "")).upper() in ("CONNECTED", "ACTIVE", "OK", "")
+          ]
+          if not tiktok:
+              # fallback: any tiktok regardless of status
+              tiktok = [p for p in platforms if "tiktok" in str(p.get("platform", "")).lower()]
+          if not tiktok:
+              print("ERROR: No TikTok account connected in Taisly.")
+              print("Connect TikTok at https://app.taisly.com then re-run.")
+              sys.exit(1)
+
+          tiktok_id = tiktok[0]["id"]
+          print(f"\nUsing TikTok platform id: {tiktok_id} ({tiktok[0].get('username') or tiktok[0].get('displayName')})")
+
+          # Reverse order 50→46 (skip 1-15 already used); 5 posts only
+          videos = [f"day-3/Video_{n:02d}.mp4" for n in range(50, 45, -1)]
+          hour, minute = map(int, POST_TIME.split(":"))
+          start = datetime.strptime(START_DATE, "%Y-%m-%d").replace(
+              hour=hour, minute=minute, second=0, microsecond=0, tzinfo=IST
+          )
+          now = datetime.now(IST)
+          if start <= now:
+              print(f"WARNING: start {start.isoformat()} is in the past (now {now.isoformat()}).")
+              print("Bump start_date/post_time if you need future schedule.")
+
+          plan = []
+          for i, rel in enumerate(videos):
+              when = start + timedelta(days=i)
+              ms = int(when.timestamp() * 1000)
+              path = Path(rel)
+              if not path.is_file():
+                  print(f"ERROR: missing {rel}")
+                  sys.exit(1)
+              plan.append({"file": rel, "when": when, "ms": ms, "size": path.stat().st_size})
+
+          print("\n=== 2) Schedule plan (1 post / day) ===")
+          for i, row in enumerate(plan, 1):
+              print(
+                  f"  Day {i}: {row['file']} @ {row['when'].strftime('%Y-%m-%d %H:%M IST')} "
+                  f"(scheduled_ms={row['ms']}, {row['size']} bytes)"
+              )
+          print(f"Caption: {CAPTION!r}")
+          print(f"Dry run: {DRY_RUN}")
+
+          if DRY_RUN:
+              print("\nDry run complete — no posts created.")
+              sys.exit(0)
+
+          print("\n=== 3) Creating scheduled posts ===")
+          results = []
+          for i, row in enumerate(plan, 1):
+              print(f"\n--- Day {i}: uploading {row['file']} ---")
+              fields = {
+                  "platforms": json.dumps([tiktok_id]),
+                  "description": CAPTION,
+                  "previewTime": "0",
+                  "scheduled": str(row["ms"]),
+              }
+              st, resp = api(
+                  "POST",
+                  "/post",
+                  form_fields=fields,
+                  files={"video": row["file"]},
+              )
+              print("HTTP", st)
+              print(json.dumps(resp, indent=2)[:3000])
+              results.append({"day": i, "file": row["file"], "when": row["when"].isoformat(), "http": st, "resp": resp})
+              # gentle spacing between uploads
+              time.sleep(2)
+
+          print("\n=== SUMMARY ===")
+          ok = 0
+          for r in results:
+              success = (r["http"] == 200) and (r["resp"].get("success") is True)
+              ok += int(success)
+              hid = r["resp"].get("historyId") or r["resp"].get("data", {}).get("historyId")
+              print(
+                  f"Day {r['day']}: {r['file']} @ {r['when']} → "
+                  f"{'OK' if success else 'FAIL'} historyId={hid}"
+              )
+          print(f"\n{ok}/{len(results)} scheduled successfully.")
+          Path("schedule-results.json").write_text(json.dumps(results, indent=2, default=str))
+          if ok != len(results):
+              sys.exit(1)
+          PY
+
+      - name: Upload results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schedule-results
+          path: schedule-results.json
+          if-no-files-found: ignore
